@@ -503,6 +503,25 @@ body {
     padding: 24px;
 }
 
+.chart-card {
+    grid-column: 1 / -1;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    max-width: 500px;
+    margin: 0 auto;
+    width: 100%;
+}
+
+.chart-card canvas {
+    max-width: 100%;
+    max-height: 400px;
+}
+
 .stat-card {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);

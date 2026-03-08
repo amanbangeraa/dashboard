@@ -1,10 +1,11 @@
 /* ========================================
-   Summary Stats — Plain HTML Stat Cards
+   Summary Stats — Plain HTML Stat Cards + Circular Chart
    Total readings, critical, suspect counts
    ======================================== */
 
 const SummaryStats = (() => {
     let ds = null;
+    let chart = null;
 
     const demoData = {
         totalReadings: 15,
@@ -92,7 +93,11 @@ const SummaryStats = (() => {
 
         // If cards don't exist yet, create them
         if (grid.children.length === 0) {
-            grid.innerHTML = cardConfigs.map(cfg => `
+            grid.innerHTML = `
+                <div class="chart-card">
+                    <canvas id="summary-chart"></canvas>
+                </div>
+            ` + cardConfigs.map(cfg => `
                 <div class="stat-card" id="stat-${cfg.key}">
                     <div class="stat-card-icon ${cfg.colorClass}">${cfg.icon}</div>
                     <div class="stat-card-label">${cfg.label}</div>
@@ -101,6 +106,9 @@ const SummaryStats = (() => {
                 </div>
             `).join('');
         }
+
+        // Update circular chart
+        renderChart(data);
 
         // Update values with animation
         cardConfigs.forEach(cfg => {
@@ -131,6 +139,74 @@ const SummaryStats = (() => {
         setChange('totalReadings', 'All measurements', 'neutral');
         setChange('avgScore', data.avgScore < 35 ? 'Within normal range' : 'Above warning level', data.avgScore < 35 ? 'positive' : 'negative');
         setChange('maxDeviation', data.maxDeviation <= 5 ? 'Within tolerance' : 'Exceeds tolerance', data.maxDeviation <= 5 ? 'positive' : 'negative');
+    }
+
+    function renderChart(data) {
+        const canvas = document.getElementById('summary-chart');
+        if (!canvas) return;
+
+        const ctx = canvas.getContext('2d');
+
+        if (chart) {
+            chart.data.datasets[0].data = [data.goodCount, data.suspectCount, data.criticalCount];
+            chart.update();
+            return;
+        }
+
+        chart = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: ['Good', 'Suspicious', 'Critical'],
+                datasets: [{
+                    data: [data.goodCount, data.suspectCount, data.criticalCount],
+                    backgroundColor: [
+                        '#22c55e',
+                        '#eab308',
+                        '#ef4444'
+                    ],
+                    borderColor: '#1a1d29',
+                    borderWidth: 3
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: {
+                            color: 'rgba(255, 255, 255, 0.8)',
+                            padding: 15,
+                            font: {
+                                size: 13,
+                                family: 'Inter, sans-serif'
+                            }
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        padding: 12,
+                        titleFont: {
+                            size: 14,
+                            family: 'Inter, sans-serif'
+                        },
+                        bodyFont: {
+                            size: 13,
+                            family: 'Inter, sans-serif'
+                        },
+                        callbacks: {
+                            label: function(context) {
+                                const label = context.label || '';
+                                const value = context.parsed || 0;
+                                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                const percentage = ((value / total) * 100).toFixed(1);
+                                return `${label}: ${value} (${percentage}%)`;
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 
     function setChange(key, text, cls) {
