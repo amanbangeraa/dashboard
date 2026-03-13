@@ -4,7 +4,7 @@
 
 import L from 'leaflet';
 import { DataSource } from './datasource';
-import type { DataSourceStatus } from './types';
+import type { AnimalDetection, DataSourceStatus } from './types';
 import { API_BASE_URL, WS_URL } from './config';
 
 type BotStatus = 'active_running' | 'stalled' | 'non_operational';
@@ -68,10 +68,14 @@ class TrackMapPanel {
 
   private map: L.Map | null = null;
   private ds: DataSource | null = null;
+  private animalDs: DataSource | null = null;
   private markersLayer: L.LayerGroup | null = null;
+  private animalLayer: L.LayerGroup | null = null;
   private markers = new Map<string, L.CircleMarker>();
   private arrowMarkers = new Map<string, L.Marker>();
+  private animalMarkers = new Map<string, L.Marker>();
   private bots = new Map<string, Omit<BotState, 'status'>>();
+  private animalDetections: AnimalDetection[] = [];
   private demoTimer: number | null = null;
   private didAutoFit = false;
   private esp32Connected = false;
@@ -298,6 +302,72 @@ class TrackMapPanel {
     return dt.toLocaleTimeString();
   }
 
+  private formatDateTime(input: string): string {
+    const dt = new Date(input);
+    if (!Number.isFinite(dt.getTime())) return input;
+    return dt.toLocaleString();
+  }
+
+  private formatCoordinate(value: number): string {
+    return value.toFixed(6);
+  }
+
+  private normalizeConfidence(value: unknown): number {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 0;
+    if (numeric > 1 && numeric <= 100) return Math.max(0, Math.min(numeric / 100, 1));
+    return Math.max(0, Math.min(numeric, 1));
+  }
+
+  private normalizeAnimalDetection(record: unknown): AnimalDetection | null {
+    if (!record || typeof record !== 'object') return null;
+
+    const raw = record as Record<string, unknown>;
+    const latitude = Number(raw.latitude ?? raw.lat);
+    const longitude = Number(raw.longitude ?? raw.lng ?? raw.lon);
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+
+    const rawTimestamp = raw.timestamp;
+    const timestamp = typeof rawTimestamp === 'string' && rawTimestamp
+      ? rawTimestamp
+      : new Date(this.normalizeTimestamp(rawTimestamp)).toISOString();
+    const rawStatus = typeof raw.status === 'string' ? raw.status.toLowerCase() : 'active';
+
+    return {
+      id: typeof raw.id === 'string' && raw.id ? raw.id : `${timestamp}-${latitude.toFixed(5)}-${longitude.toFixed(5)}`,
+      timestamp,
+      latitude,
+      longitude,
+      animalType: typeof raw.animalType === 'string' && raw.animalType.trim() ? raw.animalType.trim() : 'Dead animal',
+      confidence: this.normalizeConfidence(raw.confidence),
+      status: rawStatus === 'resolved' ? 'resolved' : 'active',
+      source: typeof raw.source === 'string' && raw.source.trim() ? raw.source.trim() : 'vision-camera',
+      botId: typeof raw.botId === 'string' && raw.botId.trim() ? raw.botId.trim() : undefined,
+      imageUrl: typeof raw.imageUrl === 'string' && raw.imageUrl.trim() ? raw.imageUrl.trim() : undefined,
+      notes: typeof raw.notes === 'string' && raw.notes.trim() ? raw.notes.trim() : undefined,
+      chainage: Number.isFinite(Number(raw.chainage)) ? Number(raw.chainage) : null
+    };
+  }
+
+  private updateAnimalDetections(payload: unknown): void {
+    if (!Array.isArray(payload)) return;
+
+    const deduped = new Map<string, AnimalDetection>();
+    payload
+      .map((record) => this.normalizeAnimalDetection(record))
+      .filter((record): record is AnimalDetection => record !== null)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .forEach((record) => {
+        if (!deduped.has(record.id)) {
+          deduped.set(record.id, record);
+        }
+      });
+
+    this.animalDetections = Array.from(deduped.values());
+    this.render();
+  }
+
   private renderCounters(allBots: BotState[]): void {
     const counts: Record<BotStatus, number> = {
       active_running: 0,
@@ -312,10 +382,12 @@ class TrackMapPanel {
     const activeEl = document.getElementById('count-active-running');
     const stalledEl = document.getElementById('count-stalled');
     const nonOpEl = document.getElementById('count-non-operational');
+    const deadAnimalEl = document.getElementById('count-dead-animal');
 
     if (activeEl) activeEl.textContent = String(counts.active_running);
     if (stalledEl) stalledEl.textContent = String(counts.stalled);
     if (nonOpEl) nonOpEl.textContent = String(counts.non_operational);
+    if (deadAnimalEl) deadAnimalEl.textContent = String(this.animalDetections.filter((event) => event.status === 'active').length);
   }
 
   private renderTable(filteredBots: BotState[]): void {
@@ -363,6 +435,150 @@ class TrackMapPanel {
         Speed: ${bot.speed.toFixed(1)}
       </div>
     `;
+  }
+
+  private animalMarkerIcon(status: AnimalDetection['status']): L.DivIcon {
+    const pinColor = status === 'resolved' ? '#22c55e' : '#ef4444';
+    const haloColor = status === 'resolved' ? 'rgba(34, 197, 94, 0.25)' : 'rgba(239, 68, 68, 0.28)';
+
+    return L.divIcon({
+      html: `
+        <div style="position: relative; width: 28px; height: 38px; display: flex; align-items: flex-start; justify-content: center;">
+          <div style="position: absolute; top: 6px; width: 18px; height: 18px; border-radius: 999px; background: ${haloColor}; box-shadow: 0 0 0 8px ${haloColor};"></div>
+          <svg width="28" height="38" viewBox="0 0 28 38" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M14 1C7.373 1 2 6.373 2 13c0 9.25 12 24 12 24s12-14.75 12-24C26 6.373 20.627 1 14 1Z" fill="${pinColor}" stroke="#fff" stroke-width="1.5"/>
+            <text x="14" y="17" text-anchor="middle" font-size="9" font-family="Inter, sans-serif" font-weight="700" fill="#fff">DA</text>
+          </svg>
+        </div>
+      `,
+      className: 'animal-marker',
+      iconSize: [28, 38],
+      iconAnchor: [14, 36],
+      popupAnchor: [0, -28]
+    });
+  }
+
+  private animalPopupHtml(event: AnimalDetection): string {
+    const confidence = Math.round(event.confidence * 100);
+    const chainage = typeof event.chainage === 'number' ? `${event.chainage.toFixed(1)} km` : 'N/A';
+    const botId = event.botId ? `<br>Bot: ${event.botId}` : '';
+    const notes = event.notes ? `<br>Notes: ${event.notes}` : '';
+
+    return `
+      <div class="popup-content alert">
+        <strong>${event.animalType}</strong><br>
+        Status: ${event.status}<br>
+        Confidence: ${confidence}%<br>
+        Coordinates: ${this.formatCoordinate(event.latitude)}, ${this.formatCoordinate(event.longitude)}<br>
+        Chainage: ${chainage}${botId}<br>
+        Source: ${event.source}<br>
+        Detected: ${this.formatDateTime(event.timestamp)}${notes}
+      </div>
+    `;
+  }
+
+  private renderAnimalMarkers(): void {
+    const animalLayer = this.animalLayer;
+    if (!animalLayer) return;
+
+    const visibleIds = new Set(this.animalDetections.map((event) => event.id));
+
+    this.animalDetections.forEach((event) => {
+      const existingMarker = this.animalMarkers.get(event.id);
+      if (!existingMarker) {
+        const created = L.marker([event.latitude, event.longitude], {
+          icon: this.animalMarkerIcon(event.status),
+          zIndexOffset: 2000
+        })
+          .bindPopup(this.animalPopupHtml(event), { className: 'custom-popup' })
+          .addTo(animalLayer);
+        this.animalMarkers.set(event.id, created);
+        return;
+      }
+
+      existingMarker.setLatLng([event.latitude, event.longitude]);
+      existingMarker.setIcon(this.animalMarkerIcon(event.status));
+      existingMarker.setPopupContent(this.animalPopupHtml(event));
+      if (!animalLayer.hasLayer(existingMarker)) {
+        existingMarker.addTo(animalLayer);
+      }
+    });
+
+    this.animalMarkers.forEach((marker, markerId) => {
+      if (visibleIds.has(markerId)) return;
+      if (animalLayer.hasLayer(marker)) {
+        animalLayer.removeLayer(marker);
+      }
+      this.animalMarkers.delete(markerId);
+    });
+  }
+
+  private renderAnimalList(): void {
+    const container = document.getElementById('track-animal-list');
+    if (!container) return;
+
+    const events = [...this.animalDetections]
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, 8);
+
+    if (!events.length) {
+      container.innerHTML = '<div class="track-alert-empty">No dead animal detections reported yet.</div>';
+      return;
+    }
+
+    container.innerHTML = events.map((event) => {
+      const confidence = Math.round(event.confidence * 100);
+      const chainage = typeof event.chainage === 'number' ? `${event.chainage.toFixed(1)} km` : 'Chainage unavailable';
+      return `
+        <article class="track-alert-item ${event.status}">
+          <div class="track-alert-item-header">
+            <div>
+              <div class="track-alert-item-title">${event.animalType}</div>
+              <div class="track-alert-item-meta">${this.formatDateTime(event.timestamp)}</div>
+            </div>
+            <span class="track-status-pill ${event.status === 'resolved' ? 'active_running' : 'non_operational'}">${event.status}</span>
+          </div>
+          <div class="track-alert-item-meta">
+            <div class="track-alert-item-coords">${this.formatCoordinate(event.latitude)}, ${this.formatCoordinate(event.longitude)}</div>
+            <div>Confidence: ${confidence}%</div>
+            <div>${chainage}</div>
+            <div>Source: ${event.source}${event.botId ? ` · ${event.botId}` : ''}</div>
+          </div>
+          <div class="track-alert-item-footer">
+            <span class="track-source-pill ${event.status === 'resolved' ? 'real' : 'demo'}">GPS Tagged</span>
+            <button class="track-alert-focus" type="button" data-animal-id="${event.id}">Locate on map</button>
+          </div>
+        </article>
+      `;
+    }).join('');
+  }
+
+  private updateAutoFit(filteredBots: BotState[]): void {
+    if (this.didAutoFit || !this.map) return;
+
+    const points: [number, number][] = [
+      ...filteredBots.map((bot) => [bot.lat, bot.lng] as [number, number]),
+      ...this.animalDetections
+        .filter((event) => event.status === 'active')
+        .map((event) => [event.latitude, event.longitude] as [number, number])
+    ];
+
+    if (!points.length) return;
+
+    this.map.fitBounds(points, { padding: [40, 40], maxZoom: 14 });
+    this.didAutoFit = true;
+  }
+
+  private focusAnimalDetection(eventId: string): void {
+    const event = this.animalDetections.find((item) => item.id === eventId);
+    if (!event || !this.map) return;
+
+    this.map.setView([event.latitude, event.longitude], Math.max(this.map.getZoom(), 15), {
+      animate: true
+    });
+
+    const marker = this.animalMarkers.get(eventId);
+    marker?.openPopup();
   }
 
   private renderMarkers(allBots: BotState[], filteredBots: BotState[]): void {
@@ -429,11 +645,6 @@ class TrackMapPanel {
       }
     });
 
-    if (!this.didAutoFit && filteredBots.length && this.map) {
-      const points = filteredBots.map((bot) => [bot.lat, bot.lng] as [number, number]);
-      this.map.fitBounds(points, { padding: [40, 40], maxZoom: 14 });
-      this.didAutoFit = true;
-    }
   }
 
   private render(): void {
@@ -441,7 +652,10 @@ class TrackMapPanel {
     const filtered = this.applyFilters(allBots);
     this.renderCounters(allBots);
     this.renderTable(filtered);
+    this.renderAnimalList();
     this.renderMarkers(allBots, filtered);
+    this.renderAnimalMarkers();
+    this.updateAutoFit(filtered);
   }
 
   private processPayload(payload: unknown, sourceOverride?: BotSource): void {
@@ -596,6 +810,17 @@ class TrackMapPanel {
     searchFilter?.addEventListener('input', () => this.render());
   }
 
+  private bindAnimalListEvents(): void {
+    const container = document.getElementById('track-animal-list');
+    container?.addEventListener('click', (event) => {
+      const target = event.target as HTMLElement | null;
+      const button = target?.closest<HTMLButtonElement>('[data-animal-id]');
+      const eventId = button?.dataset.animalId;
+      if (!eventId) return;
+      this.focusAnimalDetection(eventId);
+    });
+  }
+
   private bindESP32Events(): void {
     window.addEventListener('esp32-status', (event: Event) => {
       const customEvent = event as CustomEvent<{ connected?: boolean }>;
@@ -648,6 +873,7 @@ class TrackMapPanel {
     }).addTo(this.map);
 
     this.markersLayer = L.layerGroup().addTo(this.map);
+    this.animalLayer = L.layerGroup().addTo(this.map);
 
     this.demoBots.forEach((bot) => {
       L.polyline(bot.path, {
@@ -691,12 +917,33 @@ class TrackMapPanel {
     this.ds.start();
   }
 
+  private initAnimalDataSource(): void {
+    this.animalDs = new DataSource('trackmap-animal-events');
+
+    if (!this.animalDs.isConfigured()) {
+      this.animalDs.saveConfig({
+        apiUrl: `${API_BASE_URL}/api/animal-events`,
+        pollInterval: 5,
+        wsUrl: '',
+        dataPath: 'events'
+      });
+    }
+
+    this.animalDs.onData = (payload) => {
+      this.updateAnimalDetections(payload);
+    };
+
+    this.animalDs.start();
+  }
+
   public init(): void {
     if (this.map) return;
     this.initMap();
     this.bindFilterEvents();
+    this.bindAnimalListEvents();
     this.bindESP32Events();
     this.initDataSource();
+    this.initAnimalDataSource();
     this.updateStatus('demo');
     this.startDemo();
   }
@@ -709,6 +956,7 @@ class TrackMapPanel {
   public restart(): void {
     if (!this.ds) return;
     this.ds.restart();
+    this.animalDs?.restart();
     if (!this.ds.isConfigured()) {
       this.updateStatus('demo');
       this.startDemo();

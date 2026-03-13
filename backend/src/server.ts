@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
-import { ESP32Reading, ProcessedReading } from './types';
+import { AnimalDetectionEvent, AnimalDetectionRequest, ESP32Reading, GPSData, ProcessedReading } from './types';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -14,6 +14,10 @@ app.use(express.json({ limit: '10mb' }));
 // Store recent readings (keep last 100)
 const readings: ProcessedReading[] = [];
 const MAX_READINGS = 100;
+
+// Store recent dead-animal detection events
+const animalDetections: AnimalDetectionEvent[] = [];
+const MAX_ANIMAL_DETECTIONS = 100;
 
 // Simple chainage calculator (you can enhance this with actual GPS-based calculation)
 let currentChainage = 0;
@@ -46,6 +50,77 @@ function simulateGauge(score: number): number {
   const nominal = 1676;
   const deviation = Math.round((score / 100) * 20); // Max ±20mm based on score
   return nominal + (Math.random() > 0.5 ? deviation : -deviation);
+}
+
+function normalizeConfidence(value: unknown): number {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return 0;
+  if (numericValue > 1 && numericValue <= 100) return Math.max(0, Math.min(numericValue / 100, 1));
+  return Math.max(0, Math.min(numericValue, 1));
+}
+
+function normalizeCoordinate(value: unknown): number | null {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
+function createAnimalDetectionId(): string {
+  return `animal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function storeAnimalDetection(event: AnimalDetectionEvent): AnimalDetectionEvent {
+  animalDetections.push(event);
+  if (animalDetections.length > MAX_ANIMAL_DETECTIONS) {
+    animalDetections.shift();
+  }
+  return event;
+}
+
+function buildAnimalDetectionEvent(
+  payload: AnimalDetectionRequest | null | undefined,
+  fallbackGps?: GPSData,
+  fallbackChainage?: number,
+  fallbackSource = 'vision-camera'
+): AnimalDetectionEvent | null {
+  if (!payload) return null;
+
+  const shouldRecord = payload.deadAnimalDetected ?? payload.detected ?? true;
+  if (!shouldRecord) return null;
+
+  const latitude = normalizeCoordinate(payload.latitude ?? payload.lat ?? fallbackGps?.latitude);
+  const longitude = normalizeCoordinate(payload.longitude ?? payload.lng ?? payload.lon ?? fallbackGps?.longitude);
+
+  if (latitude == null || longitude == null) return null;
+
+  const timestamp = payload.timestamp && !Number.isNaN(Date.parse(payload.timestamp))
+    ? payload.timestamp
+    : new Date().toISOString();
+  const animalType = typeof payload.animalType === 'string' && payload.animalType.trim()
+    ? payload.animalType.trim()
+    : 'Dead animal';
+  const source = typeof payload.source === 'string' && payload.source.trim()
+    ? payload.source.trim()
+    : fallbackSource;
+  const status = payload.status === 'resolved' ? 'resolved' : 'active';
+  const chainage = Number.isFinite(Number(payload.chainage)) ? Number(payload.chainage) : fallbackChainage;
+  const botId = typeof payload.botId === 'string' && payload.botId.trim() ? payload.botId.trim() : undefined;
+  const imageUrl = typeof payload.imageUrl === 'string' && payload.imageUrl.trim() ? payload.imageUrl.trim() : undefined;
+  const notes = typeof payload.notes === 'string' && payload.notes.trim() ? payload.notes.trim() : undefined;
+
+  return {
+    id: createAnimalDetectionId(),
+    timestamp,
+    latitude,
+    longitude,
+    animalType,
+    confidence: normalizeConfidence(payload.confidence),
+    status,
+    source,
+    botId,
+    imageUrl,
+    notes,
+    chainage
+  };
 }
 
 // WebSocket clients
@@ -92,6 +167,7 @@ app.get('/', (req: Request, res: Response) => {
     health: '/health',
     endpoints: {
       esp32Data: '/api/esp32/data',
+      animalEvents: '/api/animal-events',
       esp32Status: '/api/esp32/status',
       readings: '/api/readings',
       ws: '/ws'
@@ -147,6 +223,29 @@ app.post('/api/esp32/data', (req: Request, res: Response) => {
       satellites: data.gps.satellites,
       fftMagnitudes: data.fftMagnitudes || []
     };
+
+    const animalDetectionPayload: AnimalDetectionRequest | undefined = data.animalDetection || (data.vision?.deadAnimalDetected
+      ? {
+          deadAnimalDetected: true,
+          animalType: data.vision.animalType,
+          confidence: data.vision.confidence,
+          imageUrl: data.vision.imageUrl,
+          notes: data.vision.notes,
+          botId: data.deviceId ?? esp32DeviceId ?? undefined,
+          timestamp: data.timestamp,
+          source: 'esp32-vision',
+          chainage: processedReading.chainage,
+          latitude: data.gps.latitude,
+          longitude: data.gps.longitude
+        }
+      : undefined);
+
+    const animalDetectionEvent = buildAnimalDetectionEvent(
+      animalDetectionPayload,
+      data.gps,
+      processedReading.chainage,
+      'esp32-vision'
+    );
     
     // Store reading
     readings.push(processedReading);
@@ -159,6 +258,17 @@ app.post('/api/esp32/data', (req: Request, res: Response) => {
       type: 'reading',
       data: processedReading
     });
+
+    if (animalDetectionEvent) {
+      const savedAnimalEvent = storeAnimalDetection(animalDetectionEvent);
+      broadcast({
+        type: 'animal_detection',
+        data: savedAnimalEvent
+      });
+      console.log(
+        `⚠ Dead animal detected at ${savedAnimalEvent.latitude.toFixed(6)}, ${savedAnimalEvent.longitude.toFixed(6)} | Confidence: ${Math.round(savedAnimalEvent.confidence * 100)}%`
+      );
+    }
     
     // Broadcast ESP32 status update
     broadcast({
@@ -186,12 +296,56 @@ app.post('/api/esp32/data', (req: Request, res: Response) => {
   }
 });
 
+// Dedicated dead animal event endpoint for vision/AI pipeline integrations
+app.post('/api/animal-events', (req: Request, res: Response) => {
+  try {
+    const payload = req.body as AnimalDetectionRequest;
+    const event = buildAnimalDetectionEvent(payload, undefined, undefined, 'vision-camera');
+
+    if (!event) {
+      res.status(400).json({
+        success: false,
+        error: 'Valid dead animal detection with GPS coordinates is required'
+      });
+      return;
+    }
+
+    const savedEvent = storeAnimalDetection(event);
+
+    broadcast({
+      type: 'animal_detection',
+      data: savedEvent
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Dead animal detection recorded',
+      event: savedEvent
+    });
+  } catch (error) {
+    console.error('Error processing animal detection:', error);
+    res.status(400).json({
+      success: false,
+      error: 'Invalid animal detection payload'
+    });
+  }
+});
+
 // Get all readings
 app.get('/api/readings', (req: Request, res: Response) => {
   res.json({
     success: true,
     count: readings.length,
     readings: readings
+  });
+});
+
+app.get('/api/animal-events', (req: Request, res: Response) => {
+  const recentEvents = animalDetections.slice(-50).reverse();
+  res.json({
+    success: true,
+    count: recentEvents.length,
+    events: recentEvents
   });
 });
 
@@ -278,6 +432,7 @@ app.get('/api/readings/trackmap', (req: Request, res: Response) => {
 // Reset data (for testing)
 app.post('/api/reset', (req: Request, res: Response) => {
   readings.length = 0;
+  animalDetections.length = 0;
   currentChainage = 0;
   console.log('🔄 Data reset');
   res.json({ success: true, message: 'Data reset successfully' });

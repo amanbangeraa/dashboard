@@ -152,6 +152,10 @@
                                 <p>Non-operational</p>
                                 <h3 id="count-non-operational">0</h3>
                             </article>
+                            <article class="track-status-card track-alert-card">
+                                <p>Dead Animal Alerts</p>
+                                <h3 id="count-dead-animal">0</h3>
+                            </article>
                         </div>
 
                         <div class="track-filter-row">
@@ -183,24 +187,34 @@
                         <div class="map-container" id="map-container"></div>
                     </section>
 
-                    <section class="track-ops-bottom">
-                        <div class="track-botlist-header">
-                            <h3>Bot Overview</h3>
-                            <span>Current filtered bots</span>
-                        </div>
-                        <div class="track-botlist-wrap">
-                            <table class="events-table track-bot-table">
-                                <thead>
-                                    <tr>
-                                        <th>Bot ID</th>
-                                        <th>Status</th>
-                                        <th>Source</th>
-                                        <th>Last Seen</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="track-botlist-body"></tbody>
-                            </table>
-                        </div>
+                    <section class="track-ops-bottom track-bottom-grid">
+                        <article class="track-bottom-card">
+                            <div class="track-botlist-header">
+                                <h3>Bot Overview</h3>
+                                <span>Current filtered bots</span>
+                            </div>
+                            <div class="track-botlist-wrap">
+                                <table class="events-table track-bot-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Bot ID</th>
+                                            <th>Status</th>
+                                            <th>Source</th>
+                                            <th>Last Seen</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="track-botlist-body"></tbody>
+                                </table>
+                            </div>
+                        </article>
+
+                        <article class="track-bottom-card">
+                            <div class="track-botlist-header">
+                                <h3>Dead Animal Alerts</h3>
+                                <span>Latest GPS-tagged detections</span>
+                            </div>
+                            <div class="track-alert-list" id="track-animal-list"></div>
+                        </article>
                     </section>
                 </div>
             </div>

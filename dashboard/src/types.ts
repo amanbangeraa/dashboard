@@ -8,6 +8,21 @@ export interface EventData {
   gauge: number;
 }
 
+export interface AnimalDetection {
+  id: string;
+  timestamp: string;
+  latitude: number;
+  longitude: number;
+  animalType: string;
+  confidence: number;
+  status: 'active' | 'resolved';
+  source: string;
+  botId?: string;
+  imageUrl?: string;
+  notes?: string;
+  chainage?: number | null;
+}
+
 export interface FFTData {
   frequencies: number[];
   amplitudes: number[];
